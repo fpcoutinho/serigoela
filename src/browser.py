@@ -1,58 +1,55 @@
-import socket
+import sys
+from pathlib import Path
+
+from handlers.registry import get_handler_for
+from handlers.renderers import strip_tags_and_unescape
 
 
-class URL:
-    def __init__(self, url):
-        self.scheme, url = url.split("://", 1)
-        assert self.scheme == "http"
-        if "/" not in url:
-            url = url + "/"
-        self.host, url = url.split("/", 1)
-        self.path = "/" + url
+def main(argv=None) -> int:
+    argv = argv or sys.argv[1:]
+    if argv:
+        url = argv[0]
+    else:
+        # default to ./index.html if present
+        p = Path("index.html")
+        if p.exists():
+            url = p.resolve().as_uri()
+        else:
+            print("usage: browser.py <url>")
+            return 2
 
-    def request(self):
-        s = socket.socket(
-            family=socket.AF_INET,
-            type=socket.SOCK_STREAM,
-            proto=socket.IPPROTO_TCP,
-        )
-        s.connect((self.host, 80))
-        request = "GET {} HTTP/1.0\r\n".format(self.path)
-        request += "Host: {}\r\n".format(self.host)
-        request += "\r\n"
-        s.send(request.encode("utf8"))
-        response = s.makefile("r", encoding="utf8", newline="\r\n")
-        statusline = response.readline()
-        version, status, explanation = statusline.split(" ", 2)
-        response_headers = {}
-        while True:
-            line = response.readline()
-            if line == "\r\n":
-                break
-            header, value = line.split(":", 1)
-            response_headers[header.casefold()] = value.strip()
-        assert "transfer-encoding" not in response_headers
-        assert "content-encoding" not in response_headers
-        content = response.read()
-        s.close()
-        return content
+    try:
+        handler = get_handler_for(url)
+    except Exception as e:
+        print(f"error: {e}")
+        return 1
 
-    def show(self, body):
-        in_tag = False
-        for c in body:
-            if c == "<":
-                in_tag = True
-            elif c == ">":
-                in_tag = False
-            elif not in_tag:
-                print(c, end="")
+    try:
+        resp = handler.fetch()
+    except Exception as e:
+        print(f"fetch error: {e}")
+        return 1
 
-    def load(self):
-        body = self.request()
-        self.show(body)
+    body = resp.body
+    if isinstance(body, bytes):
+        text = body.decode("utf8", errors="replace")
+    else:
+        text = str(body)
+
+    # simple heuristic: if HTML, strip tags and unescape entities
+    ctype = (resp.content_type or "").lower()
+    if (
+        ctype.startswith("text/html")
+        or url.startswith("data:text/html")
+        or url.endswith(".html")
+    ):
+        out = strip_tags_and_unescape(text)
+    else:
+        out = text
+
+    print(out)
+    return 0
 
 
 if __name__ == "__main__":
-    import sys
-
-    URL.load(URL(sys.argv[1]))
+    raise SystemExit(main())
